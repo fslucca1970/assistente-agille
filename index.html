@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Assistente de Conteúdo Social Simplificado</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet">
+    
+    <script type="module">
+        // --- API Keys and Constants ---
+        const API_KEY = ""; // Chave da API fornecida pelo ambiente Canvas
+        
+        // Variável global para armazenar a imagem de inspiração em Base64
+        let inspirationImageBase64 = null; 
+
+        // --- Variáveis de Estado (para regeneração após a limpeza dos campos) ---
+        let lastTopic = "";
+        let lastSocialNetwork = "";
+        let lastAudience = "";
+        let lastTone = "";
+        let lastInspirationImageBase64 = null;
+        
+        // --- CÓDIGOS ROTATIVOS POR ANO/MÊS (REQUISITO AGILLE) ---
+        // Mapeamento: [Ano] -> [Mês (0=Jan a 11=Dez)] -> {code, monthName}
+        // Este é o mecanismo de "senha" e controle de validade da avaliação.
+        const ALL_ROTATING_CODES = {
+            2025: {
+                // Código para Dezembro de 2025
+                11: { code: "AGILLE001", monthName: "Dezembro" } 
+            },
+            2026: {
+                // Códigos para todo o ano de 2026
+                0: { code: "AGP01", monthName: "Janeiro" },
+                1: { code: "AAI02", monthName: "Fevereiro" },
+                2: { code: "AGI03", monthName: "Março" },
+                3: { code: "AGP04", monthName: "Abril" },
+                4: { code: "AAI05", monthName: "Maio" },
+                5: { code: "AGI06", monthName: "Junho" },
+                6: { code: "AGP07", monthName: "Julho" },
+                7: { code: "AAI08", monthName: "Agosto" },
+                8: { code: "AGI09", monthName: "Setembro" },
+                9: { code: "AGP10", monthName: "Outubro" },
+                10: { code: "AAI11", monthName: "Novembro" },
+                11: { code: "AGI12", monthName: "Dezembro" } 
+            }
+        };
+        
+        // --- DOM Elements (Initial declaration, assigned in window.onload) ---
+        let generateButton;
+        let regenerateButton;
+        let topicInputEl;
+        let socialNetworkSelectEl;
+        let audienceSelectEl;
+        let toneSelectEl;
+        let accessCodeInputEl; 
+        let accessStatusEl; 
+        let countdownEl; 
+        let resultContainerEl;
+        let versionDateInfoEl; 
+        let inspirationImageInputEl; 
+        let inspirationImagePreviewEl; 
+        
+        // --- FUNÇÕES DE LÓGICA DE ACESSO ---
+
+        /**
+         * Retorna a data de expiração (último milissegundo do mês) para um determinado ano e mês.
+         * @param {number} year - O ano (ex: 2026).
+         * @param {number} monthIndex - O índice do mês (0-11).
+         * @returns {Date} Data de expiração.
+         */
+        function getEndOfMonth(year, monthIndex) {
+            return new Date(year, monthIndex + 1, 0, 23, 59, 59, 999);
+        }
+
+        /**
+         * Determina o status do código de acesso para o mês/ano atual.
+         * @returns {object} Informações de acesso (expectedCode, expirationDate, validForUsage, monthName, expired).
+         */
+        function getAccessInfo() {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = now.getMonth(); // 0-11
+
+            const yearData = ALL_ROTATING_CODES[year];
+
+            if (!yearData) {
+                return { 
+                    validForUsage: false, 
+                    message: "A avaliação é válida apenas para Dezembro de 2025 e o ano de 2026.",
+                    expirationDate: null
+                };
+            }
+
+            const info = yearData[month];
+            if (!info) { 
+                return { 
+                    validForUsage: false, 
+                    message: `O mês atual (${month + 1}/${year}) não está na lista de avaliação.`,
+                    expirationDate: null
+                };
+            }
+            
+            const expirationDate = getEndOfMonth(year, month);
+            
+            if (now > expirationDate) {
+                return { 
+                    validForUsage: false, 
+                    expectedCode: info.code,
+                    expirationDate: expirationDate,
+                    monthName: info.monthName,
+                    expired: true
+                };
+            }
+            
+            return {
+                validForUsage: true,
+                expectedCode: info.code,
+                expirationDate: expirationDate,
+                monthName: info.monthName,
+                expired: false
+            };
+        }
+        
+        // --- FUNÇÕES DE UTILIDADE DE UI ---
+
+        
+        // A função updateStatus usa o console para logs e a div 'feedback-message' para feedback visual.
+        function updateStatus(type, text) {
+            console.log(`[Status ${type.toUpperCase()}]: ${text}`);
+            const feedbackEl = document.getElementById('feedback-message');
+            
+            let colorClasses = '';
+            
+            switch (type) {
+                case 'success':
+                    colorClasses = 'p-3 mb-4 rounded-lg text-sm font-medium bg-green-100 text-green-700';
+                    break;
+                case 'error':
+                    colorClasses = 'p-3 mb-4 rounded-lg text-sm font-medium bg-red-100 text-red-700';
+                    break;
+                case 'warning':
+                    colorClasses = 'p-3 mb-4 rounded-lg text-sm font-medium bg-yellow-100 text-yellow-700';
+                    break;
+                default:
+                    colorClasses = 'p-3 mb-4 rounded-lg text-sm font-medium bg-blue-100 text-blue-700';
+            }
+            
+            feedbackEl.textContent = text;
+            feedbackEl.className = colorClasses;
+
+            // Limpa a mensagem após 5 segundos, exceto para erros
+            if (type !== 'error') {
+                setTimeout(() => {
+                    if (feedbackEl.textContent === text) {
+                        feedbackEl.textContent = ''; 
+                        feedbackEl.className = ''; 
+                    }
+                }, 5000);
+            }
+        }
+        
+        /**
+         * Controla a exibição e o cálculo da contagem regressiva.
+         * @param {boolean} show - Se deve mostrar ou esconder o contador de dias.
+         */
+        function updateAccessFeedback(show) {
+            if (!countdownEl) return;
+
+            if (show) {
+                const accessInfo = getAccessInfo();
+                const now = new Date();
+                
+                if (accessInfo.expired || !accessInfo.expirationDate) {
+                    countdownEl.textContent = `Acesso Expirado (${accessInfo.monthName} / ${accessInfo.expirationDate ? accessInfo.expirationDate.getFullYear() : 'N/A'})`;
+                    countdownEl.classList.remove('text-red-600');
+                    countdownEl.classList.add('text-gray-500');
+                } else {
+                    const differenceMs = accessInfo.expirationDate.getTime() - now.getTime();
+                    const daysRemaining = Math.ceil(differenceMs / (1000 * 60 * 60 * 24));
+                    
+                    countdownEl.textContent = `${daysRemaining} dias restantes de ${accessInfo.monthName} / ${accessInfo.expirationDate.getFullYear()}`;
+                    countdownEl.classList.remove('text-gray-500');
+                    countdownEl.classList.add('text-red-600');
+                }
+
+                countdownEl.classList.remove('opacity-0');
+                countdownEl.classList.add('opacity-100');
+                
+            } else {
+                countdownEl.classList.remove('opacity-100');
+                countdownEl.classList.add('opacity-0');
+            }
+        }
+
+        // Função para verificar se o código de acesso está correto
+        function isAccessCodeValid() {
+             const accessInfo = getAccessInfo();
+             return accessCodeInputEl && accessCodeInputEl.value.trim() === accessInfo.expectedCode && accessInfo.validForUsage;
+        }
+
+        function toggleLoading(isLoading, isRegenerating = false) {
+             const accessInfo = getAccessInfo();
+             const isCodeValid = isAccessCodeValid();
+             const shouldDisable = isLoading || !isCodeValid || !accessInfo.validForUsage;
+             
+             // Desabilita o botão principal e o de regeneração
+             generateButton.disabled = shouldDisable; 
+             if (regenerateButton) {
+                 // Regenerar só deve ser habilitado se não estiver carregando E houver um resultado anterior
+                 regenerateButton.disabled = isLoading || resultContainerEl.style.display === 'none'; 
+                 regenerateButton.classList.toggle('bg-gray-300', regenerateButton.disabled);
+                 regenerateButton.classList.toggle('text-gray-500', regenerateButton.disabled);
+                 regenerateButton.classList.toggle('cursor-not-allowed', regenerateButton.disabled);
+                 
+                 regenerateButton.classList.toggle('bg-yellow-500', !regenerateButton.disabled);
+                 regenerateButton.classList.toggle('hover:bg-yellow-600', !regenerateButton.disabled);
+             }
+
+
+             // Estilo para o botão principal
+             generateButton.classList.toggle('bg-gray-300', shouldDisable);
+             generateButton.classList.toggle('text-gray-500', shouldDisable);
+             generateButton.classList.toggle('cursor-not-allowed', shouldDisable);
+             
+             generateButton.classList.toggle('bg-blue-600', !shouldDisable);
+             generateButton.classList.toggle('hover:bg-blue-700', !shouldDisable);
+             
+             // Atualiza o texto do botão principal
+             if (isLoading && !isRegenerating) {
+                generateButton.innerHTML = '<svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> A Gerar Conteúdo...';
+             } else if (!isLoading) {
+                 generateButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg> Gerar Conteúdo (Texto + Hashtags + Imagem)';
+             }
+             
+             // Atualiza o texto do botão de regeneração
+             if (regenerateButton) {
+                 if (isLoading && isRegenerating) {
+                    regenerateButton.innerHTML = '<svg class="animate-spin -ml-1 mr-3 h-4 w-4 text-white" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg> Gerar Alternativa...';
+                 } else if (!isLoading) {
+                    regenerateButton.innerHTML = '<svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.4L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.4L3 16"/></svg> Gerar Alternativa';
+                 }
+             }
+        }
+        
+        // --- General API Caller with Exponential Backoff ---
+        async function callApi(apiUrl, payload, maxRetries = 3) {
+            for (let currentRetry = 0; currentRetry < maxRetries; currentRetry++) {
+                try {
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+
+                    if (!response.ok) {
+                        if (response.status === 429 && currentRetry < maxRetries - 1) {
+                            const delay = Math.pow(2, currentRetry) * 1000 + Math.random() * 1000;
+                            await new Promise(resolve => setTimeout(resolve, delay));
+                            continue; 
+                        }
+                        throw new Error(`HTTP error! Status: ${response.status}`);
+                    }
+                    return await response.json();
+
+                } catch (error) {
+                    console.error(`Tentativa ${currentRetry + 1} falhou:`, error);
+                    if (currentRetry === maxRetries - 1) {
+                        throw new Error(`Falha na chamada à API após ${maxRetries} tentativas.`);
+                    }
+                }
+            }
+        }
+
+
+        // --- Gemini API Functions (Text/Hashtags/Visual Prompt) ---
+
+        async function generateTextAndVisualPrompt(topicPrompt, socialNetwork, audience, tone) {
+            const systemPrompt = `Você é um assistente de marketing digital experiente. Sua tarefa é criar um pacote de conteúdo completo para a rede social **"${socialNetwork}"** baseado no tópico fornecido, ajustando-o para o público "${audience}" e usando um tom "${tone}". **A legenda e as hashtags devem seguir as melhores práticas do ${socialNetwork} (e.g., mais foco visual para Instagram, mais profissional para LinkedIn, mais engajador para Facebook)**. O pacote deve incluir: 
+            1. Uma Legenda profissional e envolvente (máximo 4 frases).
+            2. Um conjunto de 8 a 12 hashtags relevantes.
+            3. Um Prompt Visual detalhado em inglês para gerar uma imagem 1:1, de alta qualidade, que ilustre o tema com um estilo fotográfico de estúdio moderno.
+
+            Forneça a resposta estritamente no formato JSON.`;
+            
+            const userQuery = `Tópico: "${topicPrompt}"`;
+            
+            const payload = {
+                contents: [{ parts: [{ text: userQuery }] }],
+                systemInstruction: { parts: [{ text: systemPrompt }] },
+                generationConfig: {
+                    responseMimeType: "application/json",
+                    responseSchema: {
+                        type: "OBJECT",
+                        properties: {
+                            "caption": { "type": "STRING", "description": "Legenda curta e envolvente para redes sociais." },
+                            "hashtags": { "type": "STRING", "description": "8 a 12 hashtags relevantes, formatadas como uma única string (ex: #marketing #dicas #negocios)." },
+                            "visualPrompt": { "type": "STRING", "description": "Prompt detalhado em inglês para uma IA de imagem, com estilo fotográfico de estúdio, 1:1, que ilustre o conceito." }
+                        },
+                        propertyOrdering: ["caption", "hashtags", "visualPrompt"]
+                    }
+                }
+            };
+
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${API_KEY}`;
+            
+            const result = await callApi(apiUrl, payload);
+            
+            const jsonString = result.candidates?.[0]?.content?.parts?.[0]?.text;
+            if (jsonString) {
+                return JSON.parse(jsonString);
+            }
+            throw new Error("Resposta da IA de Texto incompleta ou vazia.");
+        }
+        
+        // --- Gemini Image-to-Image / Text-to-Image Function ---
+
+        async function generateImage(imagePrompt, base64InputImage) {
+            const model = "gemini-2.5-flash-image-preview"; 
+            
+            const parts = [];
+
+            // Verifica se a imagem de inspiração é uma string válida de data URL
+            if (base64InputImage && typeof base64InputImage === 'string' && base64InputImage.startsWith('data:image/')) {
+                // Modo Image-to-Image
+                const [mimeTypePart, base64Data] = base64InputImage.split(',');
+                // Apenas precisamos do mimeType, a parte base64 é o que vem depois da vírgula
+                const mimeType = mimeTypePart.split(':')[1].split(';')[0];
+                
+                parts.push({
+                    inlineData: {
+                        mimeType: mimeType,
+                        data: base64Data // Dados Base64
+                    }
+                });
+
+                parts.push({ 
+                    text: `Refine and generate a new, high-quality image based on the following visual description: "${imagePrompt}". Use the uploaded image as a strong reference for style, composition, and color palette. Generate a single 1:1 square image.` 
+                });
+                
+            } else {
+                // Modo Text-to-Image (Se a imagem de inspiração for null, vazia ou inválida)
+                parts.push({ 
+                    text: `Generate a single 1:1 square image that strictly follows this description: "${imagePrompt}"` 
+                });
+            }
+
+            const payload = { 
+                contents: [{ parts: parts }],
+                generationConfig: {
+                    responseModalities: ['IMAGE'],
+                },
+            };
+            
+            const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${API_KEY}`;
+            
+            const result = await callApi(apiUrl, payload);
+
+            const base64Data = result.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+            if (base64Data) {
+                return `data:image/png;base64,${base64Data}`; 
+            }
+            throw new Error("Resposta da IA de Imagem incompleta ou vazia.");
+        }
+        
+        // --- FUNÇÃO DE LIMPEZA DE CAMPOS ---
+        
+        /**
+         * Limpa todos os campos de input, exceto o Código de Acesso.
+         */
+        function clearInputFields() {
+            topicInputEl.value = '';
+            socialNetworkSelectEl.value = 'Instagram';
+            audienceSelectEl.value = 'Público em Geral (Consumidores)';
+            toneSelectEl.value = 'Informativo e Profissional';
+            
+            // Limpa o Input da Imagem de Inspiração
+            inspirationImageBase64 = null;
+            inspirationImageInputEl.value = ''; 
+            
+            // Restaura o preview da imagem de inspiração
+            inspirationImagePreviewEl.src = 'https://placehold.co/100x100/f3f4f6/9ca3af?text=Sem+Inspiração';
+            inspirationImagePreviewEl.classList.add('opacity-50');
+            
+            // Opcional: Rola a página para o topo da seção de resultados para que o usuário veja o novo conteúdo
+            resultContainerEl.scrollIntoView({ behavior: 'smooth' });
+        }
+
+
+        // --- Access Control Function ---
+        function checkAccessCode() {
+            const accessInfo = getAccessInfo();
+            const isCodeMatch = accessCodeInputEl.value.trim() === accessInfo.expectedCode;
+            const currentCode = accessCodeInputEl.value.trim();
+            
+            toggleLoading(false); 
+
+            if (currentCode.length === 0) {
+                 accessStatusEl.textContent = '';
+                 accessStatusEl.className = '';
+                 updateAccessFeedback(false); 
+            } else if (!accessInfo.expectedCode) {
+                 accessStatusEl.textContent = 'AVALIAÇÃO INATIVA';
+                 accessStatusEl.className = 'text-xs font-semibold text-gray-500';
+                 updateAccessFeedback(false);
+            } else if (isCodeMatch && accessInfo.validForUsage) {
+                 accessStatusEl.textContent = `CORRETO`;
+                 accessStatusEl.className = 'text-xs font-semibold text-green-600';
+                 updateAccessFeedback(true); 
+            } else {
+                 accessStatusEl.textContent = 'INCORRETO';
+                 accessStatusEl.className = 'text-xs font-semibold text-red-500';
+                 updateAccessFeedback(false); 
+            }
+        }
+        
+        /**
+         * Função principal de execução da API, usada pelo botão principal e pelo de regeneração.
+         * @param {boolean} isRegenerating - Indica se a chamada é uma regeneração (usa o lastState).
+         */
+        async function runGeneration(isRegenerating) {
+            const accessInfo = getAccessInfo();
+            
+            if (!accessInfo.validForUsage) {
+                 let expirationMsg = accessInfo.expired ? 
+                    `O código de ${accessInfo.monthName} expirou em ${accessInfo.expirationDate.toLocaleDateString('pt-PT')}.` : 
+                    accessInfo.message || "O acesso para o mês/ano atual está inativo.";
+
+                 updateStatus('error', `❌ Acesso Inativo: ${expirationMsg}`);
+                 toggleLoading(true); 
+                 return;
+            }
+
+            // 1. Determina os inputs (se regenerando, usa o estado anterior)
+            let topic, network, audience, tone, imageBase64;
+
+            if (isRegenerating) {
+                topic = lastTopic;
+                network = lastSocialNetwork;
+                audience = lastAudience;
+                tone = lastTone;
+                imageBase64 = lastInspirationImageBase64;
+                
+                if (!topic) {
+                     updateStatus('warning', '⚠️ Não há conteúdo anterior para regenerar. Por favor, use o botão principal primeiro.');
+                     toggleLoading(false);
+                     return;
+                }
+            } else {
+                // Primeira Geração (Botão Principal)
+                topic = topicInputEl.value.trim();
+                network = socialNetworkSelectEl.value;
+                audience = audienceSelectEl.value;
+                tone = toneSelectEl.value;
+                imageBase64 = inspirationImageBase64; // Base64 do input atual
+                
+                if (!topic) {
+                    updateStatus('warning', '⚠️ Por favor, insira o seu tópico/ideia.');
+                    return;
+                }
+            }
+
+            toggleLoading(true, isRegenerating);
+            updateStatus('info', isRegenerating ? 
+                'A gerar uma nova Versão Alternativa...' : 
+                'A iniciar a primeira geração de conteúdo...');
+
+            try {
+                
+                // 2. Generate Structured Text 
+                updateStatus('info', '🤖 Passo 1/2: A criar Legenda, Hashtags e Prompt Visual...');
+                const textResult = await generateTextAndVisualPrompt(topic, network, audience, tone);
+                
+                // 3. Generate Image 
+                updateStatus('info', '🖼️ Passo 2/2: A gerar a Imagem com base no Prompt Visual e Inspiração (se fornecida)...');
+                const imageUrl = await generateImage(textResult.visualPrompt, imageBase64);
+
+                // 4. Salvar o Estado ANTES de limpar (somente na primeira geração)
+                // Se a imagemBase64 for null, ela permanece null, permitindo Text-to-Image na regeneração.
+                if (!isRegenerating) {
+                    lastTopic = topic;
+                    lastSocialNetwork = network;
+                    lastAudience = audience;
+                    lastTone = tone;
+                    lastInspirationImageBase64 = imageBase64; 
+                }
+
+                // 5. Display Results
+                document.getElementById('result-topic').textContent = topic;
+                document.getElementById('result-caption').textContent = textResult.caption;
+                document.getElementById('result-hashtags').textContent = textResult.hashtags;
+                document.getElementById('result-visual-prompt').textContent = textResult.visualPrompt;
+                document.getElementById('result-image').src = imageUrl;
+                
+                resultContainerEl.style.display = 'block'; 
+                updateStatus('success', isRegenerating ? 
+                    `✅ Alternativa gerada com sucesso para ${network}!` : 
+                    `✅ Conteúdo completo gerado com sucesso para ${network}!`);
+                
+                // 6. LIMPAR OS CAMPOS DE INPUT (somente na primeira geração)
+                if (!isRegenerating) {
+                    clearInputFields();
+                }
+                
+            } catch (error) {
+                // Se for a primeira geração, esconde a seção de resultados em erro
+                if (!isRegenerating) {
+                    resultContainerEl.style.display = 'none'; 
+                }
+                updateStatus('error', `❌ Erro na geração: ${error.message}`);
+                console.error("Erro no fluxo principal de geração:", error);
+            } finally {
+                toggleLoading(false);
+            }
+        }
+
+
+        // --- Main Generation Handler (Called by the blue button) ---
+        async function handleGenerateContent() {
+             if (generateButton.disabled) {
+                const accessInfo = getAccessInfo();
+                if (accessCodeInputEl.value.trim() !== accessInfo.expectedCode) {
+                    updateStatus('error', `❌ Código de Acesso Incorreto. O código atual é válido para ${accessInfo.monthName}.`);
+                }
+                return;
+            }
+            await runGeneration(false);
+        }
+        
+        // --- Regenerate Handler (Called by the yellow button) ---
+        async function handleRegenerateContent() {
+            if (regenerateButton.disabled) {
+                 return;
+            }
+            await runGeneration(true);
+        }
+
+        // --- Image Upload Handler ---
+        function handleInspirationImageUpload(event) {
+            const file = event.target.files[0];
+            if (!file) {
+                // Usuário limpou o campo
+                inspirationImageBase64 = null;
+                inspirationImagePreviewEl.src = 'https://placehold.co/100x100/f3f4f6/9ca3af?text=Sem+Inspiração';
+                inspirationImagePreviewEl.classList.add('opacity-50');
+                updateStatus('info', 'Imagem de inspiração removida. A geração será Text-to-Image.');
+                return;
+            }
+
+            if (!file.type.startsWith('image/')) {
+                updateStatus('warning', '⚠️ Por favor, selecione um ficheiro de imagem válido.');
+                event.target.value = ''; 
+                inspirationImageBase64 = null;
+                inspirationImagePreviewEl.src = 'https://placehold.co/100x100/f3f4f6/9ca3af?text=Sem+Inspiração';
+                return;
+            }
+
+            const reader = new FileReader();
+            reader.onloadend = function() {
+                inspirationImageBase64 = reader.result; 
+                inspirationImagePreviewEl.src = reader.result;
+                inspirationImagePreviewEl.classList.remove('opacity-50');
+                updateStatus('success', 'Imagem de inspiração carregada com sucesso.');
+            };
+            reader.onerror = function() {
+                 updateStatus('error', '❌ Falha ao ler o ficheiro de imagem.');
+            }
+            reader.readAsDataURL(file);
+        }
+
+
+        // --- Application Initialization ---
+
+        window.onload = function () {
+            // DOM Assignment
+            generateButton = document.getElementById('generate-button');
+            regenerateButton = document.getElementById('regenerate-button'); 
+            topicInputEl = document.getElementById('topic-input');
+            socialNetworkSelectEl = document.getElementById('social-network-select');
+            audienceSelectEl = document.getElementById('audience-select');
+            toneSelectEl = document.getElementById('tone-select');
+            accessCodeInputEl = document.getElementById('access-code-input');
+            accessStatusEl = document.getElementById('access-status'); 
+            countdownEl = document.getElementById('countdown-info'); 
+            resultContainerEl = document.getElementById('result-section');
+            versionDateInfoEl = document.getElementById('version-date-info');
+            inspirationImageInputEl = document.getElementById('inspiration-image-input'); 
+            inspirationImagePreviewEl = document.getElementById('inspiration-image-preview'); 
+            
+            // Estado Inicial da UI
+            checkAccessCode(); 
+            inspirationImagePreviewEl.src = 'https://placehold.co/100x100/f3f4f6/9ca3af?text=Sem+Inspiração';
+            inspirationImagePreviewEl.classList.add('opacity-50');
+
+            // Listeners
+            generateButton.addEventListener('click', handleGenerateContent);
+            regenerateButton.addEventListener('click', handleRegenerateContent);
+            accessCodeInputEl.addEventListener('input', checkAccessCode); 
+            inspirationImageInputEl.addEventListener('change', handleInspirationImageUpload); 
+            
+            // Log do código para o desenvolvedor
+            const currentInfo = getAccessInfo();
+            const yearDisplay = currentInfo.expirationDate ? currentInfo.expirationDate.getFullYear() : new Date().getFullYear();
+            console.log("CÓDIGO ESPERADO (MENSAL):", currentInfo.expectedCode ? `${currentInfo.expectedCode} (Mês: ${currentInfo.monthName}/${yearDisplay})` : currentInfo.message);
+
+            // Atualiza a data da Versão no rodapé
+            if (versionDateInfoEl) {
+                if (currentInfo.validForUsage || currentInfo.expired) {
+                    versionDateInfoEl.textContent = `Versão Válida: ${currentInfo.monthName} / ${yearDisplay}`;
+                } else {
+                    versionDateInfoEl.textContent = `Versão Válida: N/A`;
+                }
+            }
+        };
+    </script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        
+        #result-section {
+            display: none; 
+        }
+
+        .custom-select {
+            padding-top: 0.65rem; 
+            padding-bottom: 0.65rem;
+            font-size: 0.85rem; 
+        }
+        
+        details summary {
+            cursor: pointer;
+            padding: 0.25rem 0;
+            color: #3b82f6; 
+            font-weight: 600;
+            transition: color 0.2s;
+            font-size: 0.75rem; 
+            line-height: 1rem; 
+        }
+
+        details summary:hover {
+            color: #1d4ed8; 
+        }
+
+        details[open] summary {
+            color: #1d4ed8; 
+        }
+        
+        details[open] > div {
+            padding: 1rem;
+            margin-top: 0.5rem;
+            border-radius: 0.5rem;
+            background-color: #f3f4f6; 
+            border: 1px solid #e5e7eb; 
+        }
+        
+        details h4 {
+            font-size: 1rem;
+            font-weight: 700;
+            margin-top: 0.75rem;
+            margin-bottom: 0.25rem;
+            color: #1f2937; 
+        }
+    </style>
+</head>
+<body class="bg-gray-50 flex items-start justify-center min-h-screen p-4">
+    <div class="w-full max-w-2xl bg-white p-6 sm:p-8 rounded-xl shadow-xl border border-gray-100 mt-8 mb-8">
+        
+        <!-- CABEÇALHO LIMPO E SIMPLIFICADO -->
+        <div class="text-center mb-6 border-b pb-4">
+            <h1 class="text-xl sm:text-2xl font-bold text-gray-900 leading-tight">Assistente de Conteúdo Social</h1>
+            <p class="text-xs text-gray-500 mt-1">
+                Geração Completa: Texto, Hashtags e Imagem 
+                <span class="ml-2 text-gray-400 font-normal">(Avaliação Rotativa Dez/2025 a Dez/2026)</span>
+            </p>
+        </div>
+
+        <!-- Área de Feedback Temporário (Inicia vazia) -->
+        <div id="feedback-message" class="">
+        </div>
+
+        <!-- SEÇÃO DE INPUT E GERAÇÃO -->
+        <div id="content-section" class="space-y-6">
+            
+            <!-- 1. CÓDIGO DE ACESSO -->
+            <div>
+                <label for="access-code-input" class="block text-sm font-medium text-gray-700 mb-1">
+                    1. Código de Acesso Rotativo:
+                    <span id="access-status" class="ml-2 text-xs font-semibold"></span>
+                </label>
+                <input
+                    id="access-code-input"
+                    type="text"
+                    placeholder="Insira o Código de Acesso aqui"
+                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 text-sm tracking-wider"
+                />
+                
+                <div class="text-xs font-medium text-gray-500 mt-1">
+                    Lembre-se: é necessário solicitar um novo código de acesso mensalmente.
+                </div>
+                
+                <div class="mt-1">
+                    <details class="text-blue-500 font-semibold block hover:text-blue-700 text-xs">
+                        <summary class="inline-block px-1 ml-[-0.25rem]">(Ver Tutorial de Acesso)</summary>
+                        <div class="space-y-3 text-gray-700 text-xs text-left">
+                            <h4 class="text-sm">1. Como Obter o Código de Acesso</h4>
+                            <p>O Código de Acesso é fornecido pela equipe AGILLE AI e é válido apenas para o mês atual.</p>
+                            <p class="font-bold">Instrução:</p>
+                            <p>Se você ainda não tem o código para o mês atual, entre em contato com a AGILLE AI via WhatsApp para solicitá-lo:</p>
+                            <a href="https://wa.me/554830369576" target="_blank" class="text-green-600 hover:text-green-800 underline">Link de WhatsApp da AGILLE AI</a>
+                            <p class="mt-1">Lembre-se: O código expira no final do mês e será necessário solicitar um novo para o mês seguinte.</p>
+
+                            <h4 class="text-sm mt-4">2. Como Usar o Assistente</h4>
+                            <p>Siga estes passos simples para gerar o seu conteúdo completo (Texto, Hashtags e Imagem):</p>
+                            
+                            <ul class="list-disc pl-5 space-y-1">
+                                <li>**Passo 1 (Código):** Insira o código rotativo. O status deve mudar para "CORRETO".</li>
+                                <li>**Passo 2 (Conteúdo):** Preencha os campos (Tópico, Rede Social, Público-Alvo, Tom de Voz). Descreva a sua ideia de forma detalhada.</li>
+                                <li>**Passo 3 (Inspiração):** **(OPCIONAL)** Carregue uma imagem de referência para guiar o estilo e cores da imagem final. Se deixado vazio, a IA gera a imagem apenas pelo texto.</li>
+                                <li>**Passo 4 (Gerar):** Clique no botão azul "Gerar Conteúdo".</li>
+                            </ul>
+                            <p>Os resultados aparecerão na secção inferior, prontos para serem copiados e usados.</p>
+                        </div>
+                    </details>
+                </div>
+                
+                <p id="countdown-info" class="text-xs font-medium text-red-600 opacity-0 transition-opacity duration-500 mt-1"></p>
+            </div>
+            
+            <!-- CAMPO: IMAGEM DE INSPIRAÇÃO (OPCIONAL) -->
+            <div class="border p-4 rounded-lg border-gray-200">
+                <label for="inspiration-image-input" class="block text-sm font-medium text-gray-700 mb-2">
+                    2. Imagem de Inspiração <span class="text-xs font-bold text-blue-600">(OPCIONAL)</span>:
+                </label>
+                <div class="flex items-center space-x-4">
+                    <img id="inspiration-image-preview" 
+                         class="w-16 h-16 rounded-lg object-cover border border-gray-300 transition-opacity"
+                         alt="Preview da Imagem de Inspiração"
+                    >
+                    
+                    <div class="flex-1 min-w-0">
+                        <input
+                            id="inspiration-image-input"
+                            type="file"
+                            accept="image/*"
+                            class="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4
+                                   file:rounded-full file:border-0
+                                   file:text-sm file:font-semibold
+                                   file:bg-gray-100 file:text-gray-700
+                                   hover:file:bg-gray-200"
+                        />
+                    </div>
+                </div>
+                <p class="text-xs text-gray-500 mt-2">A IA usará esta imagem como referência de estilo, cores e composição. Se não for carregada, a IA cria a imagem do zero.</p>
+            </div>
+
+
+            <!-- 3. Tópico/Ideia -->
+            <div>
+                <label for="topic-input" class="block text-sm font-medium text-gray-700">
+                    3. Tópico / Ideia Principal:
+                </label>
+                <textarea
+                    id="topic-input"
+                    rows="3"
+                    placeholder="Ex: Novo produto de limpeza ecológico que economiza 50% de água e como ele ajuda o meio ambiente."
+                    class="w-full p-3 border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mt-1 text-xs"
+                    
+                ></textarea>
+            </div>
+
+            <!-- 4. Rede Social -->
+            <div>
+                <label for="social-network-select" class="block text-sm font-medium text-gray-700">
+                    4. Rede Social:
+                </label>
+                <select
+                    id="social-network-select"
+                    class="w-full custom-select border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mt-1"
+                >
+                    <option value="Instagram">Instagram (Foco Visual e Hashtags)</option>
+                    <option value="Facebook">Facebook (Foco em Engajamento e Compartilhamento)</option>
+                    <option value="LinkedIn">LinkedIn (Foco em Profissionalismo e Informação)</option>
+                </select>
+            </div>
+
+            <!-- 5. Público-Alvo -->
+            <div>
+                <label for="audience-select" class="block text-sm font-medium text-gray-700">
+                    5. Público-Alvo:
+                </label>
+                <select
+                    id="audience-select"
+                    class="w-full custom-select border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mt-1"
+                >
+                    <option value="Público em Geral (Consumidores)" selected>Público em Geral (Consumidores)</option>
+                    <option value="Profissionais Individuais (Freelancers, Autônomos)">Profissionais Individuais (Freelancers, Autônomos)</option>
+                    <option value="Pequenas e Médias Empresas (PMEs)">Pequenas e Médias Empresas (PMEs)</option>
+                    <option value="Grandes Empresas (Institucional)">Grandes Empresas (Institucional)</option>
+                    <option value="Especialistas e Profissionais de Marketing">Especialistas e Profissionais de Marketing</option>
+                </select>
+            </div>
+
+            <!-- 6. Tom -->
+            <div>
+                <label for="tone-select" class="block text-sm font-medium text-gray-700">
+                    6. Tom de Voz:
+                </label>
+                <select
+                    id="tone-select"
+                    class="w-full custom-select border border-gray-300 rounded-lg focus:ring-blue-500 focus:border-blue-500 mt-1"
+                >
+                    <option value="Informativo e Profissional">Informativo e Profissional</option>
+                    <option value="Casual e Engajador">Casual e Engajador</option>
+                    <option value="Persuasivo e Vendedor">Persuasivo e Vendedor</option>
+                    <option value="Inspiracional e Motivacional">Inspiracional e Motivacional</option>
+                </select>
+            </div>
+
+            <!-- Botão de Geração Principal -->
+            <button
+                id="generate-button"
+                class="w-full py-3 px-4 rounded-lg font-bold text-lg flex items-center justify-center transition duration-200 shadow-lg"
+            >
+                <svg xmlns="http://www.w3.org/2000/svg" class="w-5 h-5 mr-2" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M17 3a2.828 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
+                Gerar Conteúdo (Texto + Hashtags + Imagem)
+            </button>
+        </div>
+        
+        <!-- SEÇÃO DE RESULTADOS -->
+        <div id="result-section" class="mt-8 pt-6 border-t border-gray-200 space-y-6">
+            <div class="flex flex-col sm:flex-row sm:justify-between sm:items-center border-b pb-2">
+                 <h2 class="text-xl font-bold text-gray-800">Resultados Prontos para: <span id="result-topic" class="text-blue-600 italic">...</span></h2>
+                 
+                 <!-- NOVO BOTÃO DE REGENERAÇÃO -->
+                 <button
+                    id="regenerate-button"
+                    class="mt-3 sm:mt-0 py-2 px-4 rounded-lg font-semibold text-sm flex items-center justify-center transition duration-200 shadow-md bg-yellow-500 hover:bg-yellow-600 text-white disabled:bg-gray-300 disabled:text-gray-500 disabled:cursor-not-allowed"
+                    disabled
+                 >
+                    <svg xmlns="http://www.w3.org/2000/svg" class="w-4 h-4 mr-1" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 2v6h-6"/><path d="M3 12a9 9 0 0 1 15-6.4L21 8"/><path d="M3 22v-6h6"/><path d="M21 12a9 9 0 0 1-15 6.4L3 16"/></svg> 
+                    Gerar Alternativa
+                 </button>
+            </div>
+
+            <!-- 1. Imagem -->
+            <div>
+                <h3 class="text-base font-semibold text-gray-700 mb-1">1. Imagem (Formato 1:1)</h3>
+                <img id="result-image" src="https://placehold.co/400x400/e5e7eb/4b5563?text=IMAGEM+A+SER+GERADA+(1:1)" alt="Imagem gerada pela IA" class="w-full h-auto rounded-xl shadow-lg mt-2 object-cover border border-gray-300">
+            </div>
+
+            <!-- 2. Legenda -->
+            <div>
+                <h3 class="text-base font-semibold text-gray-700 mb-1">2. Legenda (Texto Principal)</h3>
+                <div class="p-4 bg-indigo-50 rounded-lg text-sm text-gray-800 border border-indigo-200">
+                    <p id="result-caption" class="whitespace-pre-wrap">O resultado da legenda aparecerá aqui.</p>
+                </div>
+            </div>
+
+            <!-- 3. Hashtags -->
+            <div>
+                <h3 class="text-base font-semibold text-gray-700 mb-1">3. Bloco de Hashtags</h3>
+                <div class="p-4 bg-indigo-50 rounded-lg text-sm font-mono break-words border border-indigo-200">
+                    <p id="result-hashtags">O bloco de hashtags aparecerá aqui.</p>
+                </div>
+            </div>
+            
+            <!-- 4. Prompt Visual (Para referência) -->
+            <div>
+                <h3 class="text-base font-semibold text-gray-700 mb-1">4. Prompt Visual (Para Imagem)</h3>
+                <div class="p-4 bg-gray-100 rounded-lg text-xs italic text-gray-700 border border-gray-300">
+                    <p id="result-visual-prompt">O prompt visual aparecerá aqui.</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- RODAPÉ E AUTORIA -->
+        <div class="mt-8 pt-6 border-t border-gray-200 text-center space-y-3">
+            <div class="flex justify-center space-x-4">
+                <a href="https://wa.me/554830369576" target="_blank" class="text-sm font-medium text-green-600 hover:text-green-800 transition duration-200">
+                    WhatsApp
+                </a>
+                <a href="https://www.agilleai.com" target="_blank" class="text-sm font-medium text-green-600 hover:text-green-800 transition duration-200">
+                    Acesse nosso Site
+                </a>
+            </div>
+            <p class="text-sm font-medium text-gray-900">
+                Desenvolvido por AGILLE AI
+            </p>
+            <p id="version-date-info" class="text-xs text-gray-500 mt-1"></p>
+        </div>
+
+    </div>
+</body>
+</html>
